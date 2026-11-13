@@ -1,0 +1,68 @@
+# 코스피·코스닥 새 공시를 텔레그램으로 보낸다.
+#
+# GitHub 자체 예약(schedule)은 몇 시간씩 늦게 도는 일이 많아서 쓰지 않는다.
+# cron-job.org가 평일 09:07~15:37(KST) 30분마다 이 워크플로의 Run workflow 버튼(workflow_dispatch)을 대신 누른다.
+#
+# 필요한 Secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DART_API_KEY
+name: dart-alert
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # sent.json을 저장소에 다시 저장하려고
+
+# 두 실행이 동시에 돌지 않게 한 줄로 세운다(앞 실행이 끝나야 다음이 시작).
+# 기다리는 실행이 여러 개면 가장 최근 것만 남는데, 그 실행이 놓친 공시까지 함께 조회하므로 빠지는 공시는 없다.
+concurrency:
+  group: dart-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # ref를 지정하면 버튼을 누른 순간이 아니라 '지금' 브랜치의 최신 커밋을 받는다.
+      # 앞 실행이 방금 저장한 sent.json을 읽어야 같은 공시를 두 번 보내지 않는다.
+      - name: 저장소 받기 (최신 기록 포함)
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: 새 공시 보내기
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: python3 dart_alert.py
+
+      # 앞 단계가 실패해도 그때까지 보낸 공시는 기록해야 다음 실행에서 다시 보내지 않는다.
+      - name: 보낸 공시 기록 저장
+        if: always()
+        run: |
+          if [ ! -f sent.json ]; then echo "sent.json이 없어 저장할 것이 없습니다."; exit 0; fi
+          git add sent.json
+          if git diff --cached --quiet; then echo "바뀐 기록이 없습니다."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "보낸 공시 기록 갱신"
+          for attempt in 1 2 3; do
+            git push && exit 0
+            git pull --rebase
+          done
+          exit 1
+
+      - name: 실패 알림
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          text=$(printf '실패\n%s' "$RUN_URL")
+          curl -sS --fail --max-time 60 --retry 2 \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${text}" \
+            --data-urlencode "disable_web_page_preview=true" > /dev/null
