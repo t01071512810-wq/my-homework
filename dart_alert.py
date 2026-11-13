@@ -4,7 +4,9 @@ GitHub Actions에서 한 번 실행되고 끝나는 프로그램이다(계속 �
 비밀 값은 코드나 .env가 아니라 환경 변수에서만 읽는다. Actions가 저장소 Secrets를 넣어 준다.
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DART_API_KEY
 
-이미 보낸 공시는 sent.json에 접수번호로 적고, 워크플로가 실행이 끝날 때마다 저장소에 저장한다.
+[중요] 종류(IMPORTANT)의 공시만 보낸다(ONLY_IMPORTANT).
+확인한 공시(보낸 것 + 중요하지 않아 건너뛴 것)는 sent.json에 접수번호로 적고,
+워크플로가 실행이 끝날 때마다 저장소에 저장한다.
 파이썬 기본 기능만 사용한다(추가 설치 없음).
 """
 
@@ -26,6 +28,7 @@ FIRST_LOOKBACK_DAYS = 3   # 처음 실행할 때 '이미 나온 공시'로 보�
 MAX_LOOKBACK_DAYS = 10    # 오래 쉬었다가 다시 돌아도 이 기간까지만 거슬러 올라간다
 KEEP_DAYS = 14            # sent.json에 남겨 둘 기간. MAX_LOOKBACK_DAYS보다 길어야 중복이 안 생긴다
 SEND_GAP = 1.1            # 한 대화방에는 1초에 한 통 정도로 보내야 텔레그램이 막지 않는다
+ONLY_IMPORTANT = True     # True면 아래 IMPORTANT에 해당하는 공시만 보낸다(하루 600~800건 → 수십 건)
 HTTP_TIMEOUT = 60         # 1주차에 텔레그램 첫 응답이 36초 걸린 적이 있다
 
 # 메시지 맨 앞에 [중요]를 붙일 공시 종류. 공시 제목(띄어쓰기 제거)에 단어가 들어 있으면 중요로 본다.
@@ -223,8 +226,17 @@ def main():
         print("처음 실행: 기록만 하고 시작 알림을 보냈습니다.")
         return 0
 
+    to_send = []
+    for item in new:
+        if ONLY_IMPORTANT and not important_label(item.get("report_nm", "")):
+            sent.add(item["rcept_no"])  # 중요하지 않은 공시는 보내지 않고 '확인함'으로만 적는다
+        else:
+            to_send.append(item)
+    save_sent(sent, today)
+    print(f"보낼 공시 {len(to_send)}건, 중요하지 않아 건너뜀 {len(new) - len(to_send)}건")
+
     failed = 0
-    for i, item in enumerate(new):
+    for i, item in enumerate(to_send):
         if i:
             time.sleep(SEND_GAP)
         try:
@@ -240,10 +252,8 @@ def main():
         sent.add(item["rcept_no"])
         save_sent(sent, today)  # 한 건 보낼 때마다 적어 둔다. 중간에 멈춰도 보낸 것은 다시 안 보낸다.
 
-    unsent = sum(1 for it in new if it["rcept_no"] not in sent)
-    if not new:
-        save_sent(sent, today)  # 오래된 기록 정리만
-    print(f"보냄 {len(new) - unsent}건, 못 보냄 {unsent}건")
+    unsent = sum(1 for it in to_send if it["rcept_no"] not in sent)
+    print(f"보냄 {len(to_send) - unsent}건, 못 보냄 {unsent}건")
     return 1 if unsent else 0
 
 
