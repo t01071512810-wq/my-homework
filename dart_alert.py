@@ -22,6 +22,7 @@ from pathlib import Path
 
 KST = timezone(timedelta(hours=9))
 SENT_FILE = Path(__file__).with_name("sent.json")
+EXCLUDE_FILE = Path(__file__).with_name("받지않을종류.txt")  # 받지 않을 공시 종류. 이 파일만 고쳐서 더하고 뺀다
 
 MARKETS = {"Y": "코스피", "K": "코스닥"}
 FIRST_LOOKBACK_DAYS = 3   # 처음 실행할 때 '이미 나온 공시'로 보고 건너뛸 기간
@@ -46,8 +47,15 @@ IMPORTANT = [
     ("자사주 취득", ("자기주식취득결정", "자기주식취득신탁계약체결결정")),
     ("공급계약", ("단일판매ㆍ공급계약", "단일판매·공급계약")),
     ("거래정지·상장폐지", ("매매거래정지", "상장폐지")),
+    ("관리종목·상장적격성", ("관리종목", "상장적격성", "매출액미달")),
     ("회생·파산", ("회생절차", "파산")),
     ("횡령·배임", ("횡령", "배임")),
+    # 2026-11-18 추가: 11-16~18 기록에서 확인만 하고 안 보낸 종류 중 다른 알림방이 흔히 보내는 것
+    ("주식 소각", ("주식소각결정",)),
+    ("투자판단 주요경영사항", ("투자판단관련주요경영사항",)),
+    ("타법인 주식 취득", ("타법인주식및출자증권취득결정",)),
+    ("소송", ("소송등의제기",)),
+    ("풍문·조회공시", ("풍문또는보도에대한해명", "조회공시요구")),
 ]
 
 
@@ -151,6 +159,25 @@ class Telegram:
             raise AlertError(f"텔레그램 전송 실패: {body.get('description')}")
 
 
+def load_excludes(path=None):
+    """받지않을종류.txt를 읽는다. 한 줄에 하나, #로 시작하면 메모. 파일이 없으면 빈 목록."""
+    path = path or EXCLUDE_FILE
+    if not path.exists():
+        print(f"{path.name}이 없어 제외하는 종류 없이 보냅니다.")
+        return []
+    words = []
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        word = line.split("#", 1)[0].replace(" ", "").strip() if not line.lstrip().startswith("#") else ""
+        if word:
+            words.append(word)
+    return words
+
+
+def excluded_word(report_nm, excludes):
+    name = report_nm.replace(" ", "")
+    return next((word for word in excludes if word in name), None)
+
+
 def important_label(report_nm):
     name = report_nm.replace(" ", "")
     for label, words in IMPORTANT:
@@ -226,14 +253,20 @@ def main():
         print("처음 실행: 기록만 하고 시작 알림을 보냈습니다.")
         return 0
 
-    to_send = []
+    excludes = load_excludes()
+    to_send, skipped_by_file = [], 0
     for item in new:
-        if ONLY_IMPORTANT and not important_label(item.get("report_nm", "")):
-            sent.add(item["rcept_no"])  # 중요하지 않은 공시는 보내지 않고 '확인함'으로만 적는다
+        name = item.get("report_nm", "")
+        if excluded_word(name, excludes):
+            skipped_by_file += 1
+            sent.add(item["rcept_no"])  # 받지않을종류.txt에 있는 종류: 보내지 않고 '확인함'으로만 적는다
+        elif ONLY_IMPORTANT and not important_label(name):
+            sent.add(item["rcept_no"])  # 중요하지 않은 공시도 보내지 않고 '확인함'으로만 적는다
         else:
             to_send.append(item)
     save_sent(sent, today)
-    print(f"보낼 공시 {len(to_send)}건, 중요하지 않아 건너뜀 {len(new) - len(to_send)}건")
+    skipped = len(new) - len(to_send)
+    print(f"보낼 공시 {len(to_send)}건, 건너뜀 {skipped}건(받지않을종류.txt {skipped_by_file}건, 중요 아님 {skipped - skipped_by_file}건)")
 
     failed = 0
     for i, item in enumerate(to_send):
@@ -249,6 +282,7 @@ def main():
                 break
             continue
         failed = 0
+        print(f"보냄: {item['rcept_no']} {item.get('corp_name', '')} {item.get('report_nm', '')}")
         sent.add(item["rcept_no"])
         save_sent(sent, today)  # 한 건 보낼 때마다 적어 둔다. 중간에 멈춰도 보낸 것은 다시 안 보낸다.
 
